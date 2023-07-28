@@ -6,7 +6,7 @@ use std::io::Read;
 
 #[derive(FromArgs)]
 #[argh(description = "ccwc – word, line, character, and byte count Word")]
-struct WC {
+struct WCArgs {
     /// flag to enable the count of bytes
     #[argh(switch, short = 'c')]
     bytes: bool,
@@ -27,9 +27,37 @@ struct WC {
     inputs: Vec<String>,
 }
 
-enum Input {
+impl WCArgs {
+    fn use_default(&self) -> bool {
+        !self.chars && !self.lines && !self.words && !self.bytes
+    }
+}
+
+enum WCInput {
     File(File, String),
     StdIn(io::Stdin, String),
+}
+
+impl WCInput {
+    fn path(&self) -> &String {
+        match self {
+            WCInput::File(_, s) => s,
+            WCInput::StdIn(_, s) => s,
+        }
+    }
+
+    fn as_buffer(&mut self, buffer: &mut Vec<u8>) -> io::Result<()> {
+        match self {
+            WCInput::File(f, _) => {
+                let mut reader = BufReader::new(f);
+                reader.read_to_end(buffer)?;
+            }
+            WCInput::StdIn(s, _) => {
+                s.read_to_end(buffer)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 struct WCOutput {
@@ -41,25 +69,25 @@ struct WCOutput {
 }
 
 impl WCOutput {
-    fn as_string(&self, wc: &WC) -> String {
+    fn as_string(&self, wc: &WCArgs) -> String {
         let mut out = String::new();
-        let default = !wc.chars && !wc.lines && !wc.words && !wc.bytes;
+        let default = wc.use_default();
 
         if wc.lines || default {
-            out.push_str(String::from(format!("\t{}", self.line_ct)).as_str());
+            out.push_str(format!("\t{}", self.line_ct).as_str());
         }
         if wc.words || default {
-            out.push_str(String::from(format!("\t{}", self.word_ct)).as_str());
+            out.push_str(format!("\t{}", self.word_ct).as_str());
         }
         if wc.chars {
-            out.push_str(String::from(format!("\t{}", self.char_ct)).as_str());
+            out.push_str(format!("\t{}", self.char_ct).as_str());
         } else if wc.bytes || default {
-            out.push_str(String::from(format!("\t{}", self.byte_ct)).as_str());
+            out.push_str(format!("\t{}", self.byte_ct).as_str());
         }
         if self.filename != "-" {
             out.push_str(format!(" {}", self.filename).as_str())
         }
-        format!("{}", out)
+        out.to_string()
     }
 }
 
@@ -75,47 +103,22 @@ impl Default for WCOutput {
     }
 }
 
-impl Input {
-    fn path(&self) -> &String {
-        match self {
-            Input::File(_, s) => s,
-            Input::StdIn(_, s) => s,
-        }
-    }
-
-    fn to_buffer(&mut self, buffer: &mut Vec<u8>) -> io::Result<()> {
-        match self {
-            Input::File(f, _) => {
-                let mut reader = BufReader::new(f);
-                reader.read_to_end(buffer)?;
-            }
-            Input::StdIn(s, _) => {
-                s.read_to_end(buffer)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-fn process_inputs(wc: &WC, inputs: &mut Vec<Input>) -> io::Result<()> {
-    if wc.inputs.len() > 0 {
+fn parse_inputs(wc: &WCArgs, inputs: &mut Vec<WCInput>) -> io::Result<()> {
+    if !wc.inputs.is_empty() {
         for f in &wc.inputs {
-            inputs.push(Input::File(File::open(f)?, f.to_string()));
+            inputs.push(WCInput::File(File::open(f)?, f.to_string()));
         }
     } else {
-        inputs.push(Input::StdIn(io::stdin(), String::from("")))
+        inputs.push(WCInput::StdIn(io::stdin(), String::from("")))
     }
     Ok(())
 }
 
-fn result_from_input(input: &mut Input, wc: &WC, buffer: &mut Vec<u8>) -> io::Result<WCOutput> {
+fn process_input(input: &mut WCInput, wc: &WCArgs, buffer: &mut Vec<u8>) -> io::Result<WCOutput> {
     let mut output = WCOutput::default();
-    // TODO: this can be made only once when parsing inputs
-    // We can make a kind of pipeline where the byte is visited by
-    // different parses and outputs the result in the end
-    let default = !wc.chars && !wc.lines && !wc.words && !wc.bytes;
+    let default = wc.use_default();
 
-    input.to_buffer(buffer)?;
+    input.as_buffer(buffer)?;
     output.filename = input.path().to_owned();
 
     let mut parsing_word = true;
@@ -124,10 +127,8 @@ fn result_from_input(input: &mut Input, wc: &WC, buffer: &mut Vec<u8>) -> io::Re
         if wc.bytes || default {
             output.byte_ct += 1;
         }
-        if wc.lines || default {
-            if *b == b'\n' {
-                output.line_ct += 1;
-            }
+        if (wc.lines || default) && *b == b'\n' {
+            output.line_ct += 1;
         }
 
         if wc.words || default {
@@ -136,10 +137,8 @@ fn result_from_input(input: &mut Input, wc: &WC, buffer: &mut Vec<u8>) -> io::Re
                     output.word_ct += 1;
                     parsing_word = false;
                 }
-            } else {
-                if !b.is_ascii_whitespace() {
-                    parsing_word = true;
-                }
+            } else if !b.is_ascii_whitespace() {
+                parsing_word = true;
             }
         }
     }
@@ -160,15 +159,15 @@ fn result_from_input(input: &mut Input, wc: &WC, buffer: &mut Vec<u8>) -> io::Re
 }
 
 fn main() -> io::Result<()> {
-    let wc: WC = argh::from_env();
+    let wc: WCArgs = argh::from_env();
 
-    let mut inputs: Vec<Input> = Vec::new();
-    process_inputs(&wc, &mut inputs)?;
+    let mut inputs: Vec<WCInput> = Vec::new();
+    parse_inputs(&wc, &mut inputs)?;
 
     let mut outputs = Vec::new();
     let mut buffer: Vec<u8> = Vec::new();
     for input in &mut inputs {
-        let output = result_from_input(input, &wc, &mut buffer)?;
+        let output = process_input(input, &wc, &mut buffer)?;
         outputs.push(output);
         buffer.clear();
     }
@@ -182,14 +181,68 @@ fn main() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-
-    #[test]
-    fn process_inputs_test() {
-        assert_eq!(0, 0)
-    }
+    use crate::{WCArgs, WCInput, WCOutput};
 
     #[test]
     fn input_path_test() {
-        assert_eq!(0, 0)
+        let filepath = String::from("test.file");
+        let f = std::fs::File::create(filepath.clone()).expect("failed to create test file");
+        let file_input = WCInput::File(f, filepath.clone());
+
+        let stdin_input = WCInput::StdIn(std::io::stdin(), "-".to_owned());
+        assert_eq!(filepath.clone().as_str(), file_input.path());
+        assert_eq!(String::from("-").as_str(), stdin_input.path());
+    }
+
+    #[test]
+    fn wcoutput_print_using_default_test() {
+        let wc = WCArgs {
+            bytes: false,
+            lines: false,
+            words: false,
+            chars: false,
+            inputs: Vec::new(),
+        };
+
+        let out = WCOutput::default();
+        let result = out.as_string(&wc);
+        let expected = "\t0\t0\t0";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn wcoutput_print_using_chars_test() {
+        let wc = WCArgs {
+            bytes: false,
+            lines: false,
+            words: false,
+            chars: true,
+            inputs: Vec::new(),
+        };
+
+        let mut out = WCOutput::default();
+        out.char_ct = 123;
+        let result = out.as_string(&wc);
+        let expected = "\t123";
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn wcoutput_print_with_input_file_test() {
+        let input = String::from("./test_file.txt");
+        let wc = WCArgs {
+            bytes: false,
+            lines: false,
+            words: false,
+            chars: false,
+            inputs: Vec::new(),
+        };
+
+        let mut out = WCOutput::default();
+        out.filename = input.clone();
+
+        let result = out.as_string(&wc);
+        let expected = format!("\t0\t0\t0 {}", input);
+        assert_eq!(result, expected);
     }
 }
