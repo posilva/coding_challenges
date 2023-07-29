@@ -1,35 +1,54 @@
-use argh::FromArgs;
+extern crate getopts;
+
+use getopts::Options;
+
+use std::env;
+use std::error::Error;
 use std::fs::File;
 use std::io;
 use std::io::BufReader;
 use std::io::Read;
 
-#[derive(FromArgs)]
-#[argh(description = "ccwc – word, line, character, and byte count Word")]
+#[derive(Default)]
 struct WCArgs {
     /// flag to enable the count of bytes
-    #[argh(switch, short = 'c')]
     bytes: bool,
 
     /// flag to enable the count of lines
-    #[argh(switch, short = 'l')]
     lines: bool,
 
     /// flag to enable the count of words
-    #[argh(switch, short = 'w')]
     words: bool,
 
     /// flag to enable the count of characters
-    #[argh(switch, short = 'm')]
     chars: bool,
 
-    #[argh(positional, greedy, description = "input file(s)")]
     inputs: Vec<String>,
 }
 
 impl WCArgs {
     fn use_default(&self) -> bool {
         !self.chars && !self.lines && !self.words && !self.bytes
+    }
+
+    fn from_env_args() -> Result<Self, getopts::Fail> {
+        let args: Vec<String> = env::args().collect();
+        let mut opts = Options::new();
+
+        opts.optflag("c", "bytes", "count the number of bytes");
+        opts.optflag("l", "lines", "count the number of lines");
+        opts.optflag("w", "words", "count the number of words");
+        opts.optflag("m", "chars", "count the number of chars");
+
+        let opts_matches = opts.parse(&args[1..])?;
+
+        Ok(WCArgs {
+            bytes: opts_matches.opt_present("c"),
+            lines: opts_matches.opt_present("l"),
+            words: opts_matches.opt_present("w"),
+            chars: opts_matches.opt_present("m"),
+            inputs: opts_matches.free.to_owned(),
+        })
     }
 }
 
@@ -158,9 +177,8 @@ fn process_input(input: &mut WCInput, wc: &WCArgs, buffer: &mut Vec<u8>) -> io::
     Ok(output)
 }
 
-fn main() -> io::Result<()> {
-    let wc: WCArgs = argh::from_env();
-
+fn main() -> Result<(), Box<dyn Error>> {
+    let wc = WCArgs::from_env_args()?;
     let mut inputs: Vec<WCInput> = Vec::new();
     parse_inputs(&wc, &mut inputs)?;
 
