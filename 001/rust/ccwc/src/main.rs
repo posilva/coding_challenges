@@ -1,16 +1,14 @@
 extern crate getopts;
 
 use getopts::Options;
-
 use std::env;
 use std::error::Error;
 use std::fs::File;
-use std::io;
 use std::io::BufReader;
 use std::io::Read;
 
 #[derive(Default)]
-struct WCArgs {
+struct WCCmd {
     /// flag to enable the count of bytes
     bytes: bool,
 
@@ -23,74 +21,146 @@ struct WCArgs {
     /// flag to enable the count of characters
     chars: bool,
 
-    inputs: Vec<String>,
+    /// input files to be processed (empty if stdin)
+    inputs: Vec<WCInput>,
+
+    /// output processed
+    outputs: Vec<WCOutput>,
 }
 
-impl WCArgs {
-    fn use_default(&self) -> bool {
+impl WCCmd {
+    fn show(&self) {
+        for o in &self.outputs {
+            println!("{}", o.as_string(self))
+        }
+    }
+
+    fn use_default_flags(&self) -> bool {
         !self.chars && !self.lines && !self.words && !self.bytes
     }
 
-    fn from_env_args() -> Result<Self, getopts::Fail> {
-        let args: Vec<String> = env::args().collect();
+    fn from_args(args: Vec<String>) -> Result<Self, getopts::Fail> {
         let mut opts = Options::new();
 
+        // define the options
         opts.optflag("c", "bytes", "count the number of bytes");
         opts.optflag("l", "lines", "count the number of lines");
         opts.optflag("w", "words", "count the number of words");
         opts.optflag("m", "chars", "count the number of chars");
 
+        // parse the options
         let opts_matches = opts.parse(&args[1..])?;
+        let arg_inputs = opts_matches.free.to_owned();
+        let mut parsed_inputs = Vec::new();
 
-        Ok(WCArgs {
+        if !arg_inputs.is_empty() {
+            for f in arg_inputs {
+                parsed_inputs.push(WCInput::File(f.to_string()));
+            }
+        } else {
+            parsed_inputs.push(WCInput::StdIn())
+        }
+
+        Ok(WCCmd {
             bytes: opts_matches.opt_present("c"),
             lines: opts_matches.opt_present("l"),
             words: opts_matches.opt_present("w"),
             chars: opts_matches.opt_present("m"),
-            inputs: opts_matches.free.to_owned(),
+            inputs: parsed_inputs,
+            outputs: Vec::new(),
         })
+    }
+
+    fn process(&mut self) -> std::io::Result<()> {
+        let mut buffer: Vec<u8> = Vec::new();
+        let default = self.use_default_flags();
+
+        for input in &mut self.inputs {
+            let mut output = WCOutput::default();
+
+            input.as_buffer(&mut buffer)?;
+            output.filename = input.path();
+
+            let mut parsing_word = true;
+            for b in buffer.iter() {
+                if self.bytes || default {
+                    output.byte_ct += 1;
+                }
+                if (self.lines || default) && *b == b'\n' {
+                    output.line_ct += 1;
+                }
+
+                if self.words || default {
+                    if parsing_word {
+                        if b.is_ascii_whitespace() {
+                            output.word_ct += 1;
+                            parsing_word = false;
+                        }
+                    } else if !b.is_ascii_whitespace() {
+                        parsing_word = true;
+                    }
+                }
+            }
+
+            if self.chars {
+                match String::from_utf8(buffer.to_owned()) {
+                    Ok(s) => {
+                        output.char_ct = s.chars().count() as u64;
+                    }
+                    _ => {
+                        // if there is an error we fallback for bytes
+                        output.char_ct = output.byte_ct;
+                    }
+                }
+            }
+            self.outputs.push(output);
+            buffer.clear();
+        }
+        Ok(())
     }
 }
 
 enum WCInput {
-    File(File, String),
-    StdIn(io::Stdin, String),
+    File(String),
+    StdIn(),
 }
 
 impl WCInput {
-    fn path(&self) -> &String {
+    fn path(&self) -> Option<String> {
         match self {
-            WCInput::File(_, s) => s,
-            WCInput::StdIn(_, s) => s,
+            WCInput::File(s) => Some(s.clone()),
+            WCInput::StdIn() => None,
         }
     }
 
-    fn as_buffer(&mut self, buffer: &mut Vec<u8>) -> io::Result<()> {
+    fn as_buffer(&mut self, buffer: &mut Vec<u8>) -> std::io::Result<()> {
         match self {
-            WCInput::File(f, _) => {
-                let mut reader = BufReader::new(f);
+            WCInput::File(f) => {
+                let file = File::open(f)?;
+                let mut reader = BufReader::new(file);
                 reader.read_to_end(buffer)?;
             }
-            WCInput::StdIn(s, _) => {
-                s.read_to_end(buffer)?;
+            WCInput::StdIn() => {
+                std::io::stdin().read_to_end(buffer)?;
             }
         }
         Ok(())
     }
 }
 
+#[derive(Default)]
 struct WCOutput {
     byte_ct: u64,
     line_ct: u64,
     word_ct: u64,
     char_ct: u64,
-    filename: String,
+    filename: Option<String>,
 }
 
 impl WCOutput {
-    fn as_string(&self, wc: &WCArgs) -> String {
+    fn as_string(&self, wc: &WCCmd) -> String {
         let mut out = String::new();
-        let default = wc.use_default();
+        let default = wc.use_default_flags();
 
         if wc.lines || default {
             out.push_str(format!("\t{}", self.line_ct).as_str());
@@ -103,124 +173,47 @@ impl WCOutput {
         } else if wc.bytes || default {
             out.push_str(format!("\t{}", self.byte_ct).as_str());
         }
-        if self.filename != "-" {
-            out.push_str(format!(" {}", self.filename).as_str())
+        if let Some(f) = &self.filename {
+            out.push_str(format!(" {}", f).as_str())
         }
         out.to_string()
     }
 }
 
-impl Default for WCOutput {
-    fn default() -> Self {
-        WCOutput {
-            byte_ct: 0,
-            line_ct: 0,
-            word_ct: 0,
-            char_ct: 0,
-            filename: String::from("-"),
-        }
-    }
-}
-
-fn parse_inputs(wc: &WCArgs, inputs: &mut Vec<WCInput>) -> io::Result<()> {
-    if !wc.inputs.is_empty() {
-        for f in &wc.inputs {
-            inputs.push(WCInput::File(File::open(f)?, f.to_string()));
-        }
-    } else {
-        inputs.push(WCInput::StdIn(io::stdin(), String::from("")))
-    }
-    Ok(())
-}
-
-fn process_input(input: &mut WCInput, wc: &WCArgs, buffer: &mut Vec<u8>) -> io::Result<WCOutput> {
-    let mut output = WCOutput::default();
-    let default = wc.use_default();
-
-    input.as_buffer(buffer)?;
-    output.filename = input.path().to_owned();
-
-    let mut parsing_word = true;
-
-    for b in buffer.iter() {
-        if wc.bytes || default {
-            output.byte_ct += 1;
-        }
-        if (wc.lines || default) && *b == b'\n' {
-            output.line_ct += 1;
-        }
-
-        if wc.words || default {
-            if parsing_word {
-                if b.is_ascii_whitespace() {
-                    output.word_ct += 1;
-                    parsing_word = false;
-                }
-            } else if !b.is_ascii_whitespace() {
-                parsing_word = true;
-            }
-        }
-    }
-
-    if wc.chars {
-        match String::from_utf8(buffer.to_owned()) {
-            Ok(s) => {
-                output.char_ct = s.chars().count() as u64;
-            }
-            _ => {
-                // if there is an error we fallback for bytes
-                output.char_ct = output.byte_ct;
-            }
-        }
-    }
-
-    Ok(output)
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
-    let wc = WCArgs::from_env_args()?;
-    let mut inputs: Vec<WCInput> = Vec::new();
-    parse_inputs(&wc, &mut inputs)?;
-
-    let mut outputs = Vec::new();
-    let mut buffer: Vec<u8> = Vec::new();
-    for input in &mut inputs {
-        let output = process_input(input, &wc, &mut buffer)?;
-        outputs.push(output);
-        buffer.clear();
-    }
-
-    for o in outputs {
-        println!("{}", o.as_string(&wc));
-    }
-
+    let args = env::args().collect();
+    let mut wc = WCCmd::from_args(args)?;
+    wc.process()?;
+    wc.show();
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{WCArgs, WCInput, WCOutput};
+
+    use crate::{WCCmd, WCInput, WCOutput};
+
+    #[test]
+    fn wccmd_parse_env_args_test() {
+        let args = vec![String::from("ccwc"), String::from("test.file")];
+        let wc = WCCmd::from_args(args).unwrap();
+
+        _ = wc;
+    }
 
     #[test]
     fn input_path_test() {
         let filepath = String::from("test.file");
-        let f = std::fs::File::create(filepath.clone()).expect("failed to create test file");
-        let file_input = WCInput::File(f, filepath.clone());
+        let file_input = WCInput::File(filepath.clone());
 
-        let stdin_input = WCInput::StdIn(std::io::stdin(), "-".to_owned());
-        assert_eq!(filepath.clone().as_str(), file_input.path());
-        assert_eq!(String::from("-").as_str(), stdin_input.path());
+        let stdin_input = WCInput::StdIn();
+        assert_eq!(filepath, file_input.path().unwrap());
+        assert_eq!(None, stdin_input.path());
     }
 
     #[test]
     fn wcoutput_print_using_default_test() {
-        let wc = WCArgs {
-            bytes: false,
-            lines: false,
-            words: false,
-            chars: false,
-            inputs: Vec::new(),
-        };
+        let wc = WCCmd::default();
 
         let out = WCOutput::default();
         let result = out.as_string(&wc);
@@ -230,16 +223,12 @@ mod tests {
 
     #[test]
     fn wcoutput_print_using_chars_test() {
-        let wc = WCArgs {
-            bytes: false,
-            lines: false,
-            words: false,
-            chars: true,
-            inputs: Vec::new(),
-        };
+        let mut wc = WCCmd::default();
+        wc.chars = true;
 
         let mut out = WCOutput::default();
         out.char_ct = 123;
+
         let result = out.as_string(&wc);
         let expected = "\t123";
         assert_eq!(result, expected);
@@ -247,20 +236,13 @@ mod tests {
 
     #[test]
     fn wcoutput_print_with_input_file_test() {
-        let input = String::from("./test_file.txt");
-        let wc = WCArgs {
-            bytes: false,
-            lines: false,
-            words: false,
-            chars: false,
-            inputs: Vec::new(),
-        };
-
+        let input = Some(String::from("./test_file.txt"));
+        let wc = WCCmd::default();
         let mut out = WCOutput::default();
         out.filename = input.clone();
 
         let result = out.as_string(&wc);
-        let expected = format!("\t0\t0\t0 {}", input);
+        let expected = format!("\t0\t0\t0 {}", input.unwrap());
         assert_eq!(result, expected);
     }
 }
